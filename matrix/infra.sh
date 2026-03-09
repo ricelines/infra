@@ -54,12 +54,6 @@ Core environment:
   CLOUDFLARE_API_TOKEN         required (DNS management + Traefik DNS-01)
   CLOUDFLARE_ZONE_NAME         defaults to MATRIX_SERVER_NAME
 
-Bot provisioning + bot env output:
-  MATRIX_BOT_USERNAME          default: $MATRIX_BOT_USERNAME
-  MATRIX_BOT_PASSWORD          required
-  MATRIX_BOT_DEVICE_NAME       default: $MATRIX_BOT_DEVICE_NAME
-  MATRIX_BOT_ENV_OUTPUT        default: $MATRIX_BOT_ENV_OUTPUT
-
 Optional security + behavior:
   HCLOUD_FIREWALL_ENABLE       default: $HCLOUD_FIREWALL_ENABLE
   HCLOUD_HTTP_ALLOW_CLOUDFLARE_ONLY default: $HCLOUD_HTTP_ALLOW_CLOUDFLARE_ONLY
@@ -504,166 +498,6 @@ wait_for_origin_matrix_versions() {
   return 1
 }
 
-matrix_login_with_password() {
-  username=$1
-  password=$2
-  out_file=$3
-  status_file=$4
-
-  login_url="$MATRIX_BASE_URL/_matrix/client/v3/login"
-  login_payload=$(jq -cn \
-    --arg user "$username" \
-    --arg password "$password" \
-    '{
-      type: "m.login.password",
-      identifier: { type: "m.id.user", user: $user },
-      password: $password
-    }')
-  http_post_json "$login_url" "$login_payload" "$out_file" "$status_file"
-}
-
-matrix_register_with_password() {
-  username=$1
-  password=$2
-  tmpdir=$3
-  user_id=$4
-  register_url="$MATRIX_BASE_URL/_matrix/client/v3/register"
-
-  auth_type="m.login.dummy"
-  auth_payload='{"type":"m.login.dummy"}'
-  if [ "$MATRIX_ALLOW_OPEN_REGISTRATION" != "true" ]; then
-    auth_type="m.login.registration_token"
-    auth_payload=$(jq -cn --arg token "$MATRIX_REGISTRATION_TOKEN" '{type: "m.login.registration_token", token: $token}')
-  fi
-
-  first_payload=$(jq -cn \
-    --arg username "$username" \
-    --arg password "$password" \
-    --argjson auth "$auth_payload" \
-    '{username: $username, password: $password, inhibit_login: false, auth: $auth}')
-
-  http_post_json "$register_url" "$first_payload" "$tmpdir/register1.json" "$tmpdir/register1.status"
-  status1=$(cat "$tmpdir/register1.status")
-
-  if [ "$status1" = "200" ]; then
-    log "apply: registered bot user $user_id"
-    return 0
-  fi
-
-  if [ "$status1" = "401" ]; then
-    session=$(jq -r '.session // empty' "$tmpdir/register1.json")
-    [ -n "$session" ] || die "apply: bot user registration returned 401 without session for $user_id"
-
-    second_stage="m.login.dummy"
-    if [ "$auth_type" = "m.login.dummy" ]; then
-      second_stage="m.login.dummy"
-    fi
-    second_auth=$(jq -cn --arg session "$session" --arg stage "$second_stage" '{type: $stage, session: $session}')
-    second_payload=$(jq -cn \
-      --arg username "$username" \
-      --arg password "$password" \
-      --argjson auth "$second_auth" \
-      '{username: $username, password: $password, inhibit_login: false, auth: $auth}')
-
-    http_post_json "$register_url" "$second_payload" "$tmpdir/register2.json" "$tmpdir/register2.status"
-    status2=$(cat "$tmpdir/register2.status")
-    if [ "$status2" = "200" ]; then
-      log "apply: registered bot user $user_id"
-      return 0
-    fi
-
-    if [ "$status2" = "400" ]; then
-      errcode2=$(jq -r '.errcode // empty' "$tmpdir/register2.json")
-      if [ "$errcode2" = "M_USER_IN_USE" ]; then
-        log "apply: bot user $user_id already exists; validating configured password"
-        return 0
-      fi
-    fi
-
-    body2=$(cat "$tmpdir/register2.json")
-    die "apply: failed to register bot user $user_id (HTTP $status2, body=$body2)"
-  fi
-
-  if [ "$status1" = "400" ]; then
-    errcode1=$(jq -r '.errcode // empty' "$tmpdir/register1.json")
-    if [ "$errcode1" = "M_USER_IN_USE" ]; then
-      log "apply: bot user $user_id already exists; validating configured password"
-      return 0
-    fi
-  fi
-
-  body1=$(cat "$tmpdir/register1.json")
-  die "apply: failed to register bot user $user_id (HTTP $status1, body=$body1)"
-}
-
-ensure_matrix_bot_user() (
-  username=$MATRIX_BOT_USERNAME
-  password=$MATRIX_BOT_PASSWORD
-  user_id="@$username:$MATRIX_SERVER_NAME"
-
-  tmpdir=$(mktemp -d)
-  trap 'rm -rf "$tmpdir"' EXIT INT TERM
-
-  matrix_login_with_password "$username" "$password" "$tmpdir/login-before.json" "$tmpdir/login-before.status"
-  login_before_status=$(cat "$tmpdir/login-before.status")
-
-  if [ "$login_before_status" = "200" ]; then
-    log "apply: bot user $user_id already exists and password is valid"
-    return 0
-  fi
-
-  if [ "$login_before_status" != "403" ]; then
-    body_before=$(cat "$tmpdir/login-before.json")
-    die "apply: failed to login as bot user $user_id before registration (HTTP $login_before_status, body=$body_before)"
-  fi
-
-  if [ "$MATRIX_ALLOW_REGISTRATION" != "true" ]; then
-    die "apply: bot user $user_id is missing or password is invalid and MATRIX_ALLOW_REGISTRATION=false"
-  fi
-
-  matrix_register_with_password "$username" "$password" "$tmpdir" "$user_id"
-
-  matrix_login_with_password "$username" "$password" "$tmpdir/login-after.json" "$tmpdir/login-after.status"
-  login_after_status=$(cat "$tmpdir/login-after.status")
-  if [ "$login_after_status" != "200" ]; then
-    body_after=$(cat "$tmpdir/login-after.json")
-    die "apply: bot user $user_id exists but MATRIX_BOT_PASSWORD does not match (HTTP $login_after_status, body=$body_after)"
-  fi
-
-  log "apply: bot user $user_id is ready"
-)
-
-dotenv_escape() {
-  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
-}
-
-dotenv_write_var() {
-  output_path=$1
-  name=$2
-  value=$3
-  printf '%s="%s"\n' "$name" "$(dotenv_escape "$value")" >>"$output_path"
-}
-
-render_bot_env_output() {
-  output_path=$1
-  output_dir=$(dirname "$output_path")
-  mkdir -p "$output_dir"
-
-  : >"$output_path"
-  printf '# Generated by infra/matrix/infra.sh apply at %s\n' "$(timestamp_utc)" >>"$output_path"
-  printf '# Contains secrets. Keep this file private.\n' >>"$output_path"
-  dotenv_write_var "$output_path" MATRIX_HOMESERVER "$MATRIX_BASE_URL"
-  dotenv_write_var "$output_path" MATRIX_USERNAME "$MATRIX_BOT_USERNAME"
-  dotenv_write_var "$output_path" MATRIX_PASSWORD "$MATRIX_BOT_PASSWORD"
-  dotenv_write_var "$output_path" MATRIX_DEVICE_NAME "$MATRIX_BOT_DEVICE_NAME"
-  dotenv_write_var "$output_path" MCP_HTTP_URL "$MATRIX_BOT_MCP_HTTP_URL"
-  dotenv_write_var "$output_path" AGENT_MODEL "$MATRIX_BOT_AGENT_MODEL"
-  dotenv_write_var "$output_path" AGENT_REASONING_EFFORT "$MATRIX_BOT_AGENT_REASONING_EFFORT"
-  dotenv_write_var "$output_path" AGENT_APPROVAL_POLICY "$MATRIX_BOT_AGENT_APPROVAL_POLICY"
-  dotenv_write_var "$output_path" AGENT_SANDBOX "$MATRIX_BOT_AGENT_SANDBOX"
-  chmod 600 "$output_path"
-}
-
 verify_registration_flow() (
   register_url="$MATRIX_BASE_URL/_matrix/client/v3/register"
   login_url="$MATRIX_BASE_URL/_matrix/client/v3/login"
@@ -769,10 +603,6 @@ run_apply() {
   if ! wait_for_origin_matrix_versions "$ipv4" 120; then
     die "apply: matrix client API did not become ready on the origin listener"
   fi
-
-  MATRIX_VERIFY_REMOTE_HOST_IP=$ipv4 ensure_matrix_bot_user
-  render_bot_env_output "$MATRIX_BOT_ENV_OUTPUT"
-  log "apply: wrote bot runtime environment to $MATRIX_BOT_ENV_OUTPUT"
 
   log "apply: matrix deployment is reconciled for $MATRIX_BASE_URL (origin IPv4: $ipv4)"
 }

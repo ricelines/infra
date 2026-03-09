@@ -54,15 +54,6 @@
 : "${MATRIX_CREATE_ADMIN_ROOM:=true}"
 : "${MATRIX_FEDERATE_ADMIN_ROOM:=false}"
 : "${MATRIX_EMERGENCY_PASSWORD:=}"
-: "${MATRIX_BOT_USERNAME:=bot}"
-: "${MATRIX_BOT_PASSWORD:=}"
-: "${MATRIX_BOT_DEVICE_NAME:=matrix-bot}"
-: "${MATRIX_BOT_MCP_HTTP_URL:=http://agent.internal:8080/mcp}"
-: "${MATRIX_BOT_AGENT_MODEL:=gpt-5.1-codex-mini}"
-: "${MATRIX_BOT_AGENT_REASONING_EFFORT:=medium}"
-: "${MATRIX_BOT_AGENT_APPROVAL_POLICY:=never}"
-: "${MATRIX_BOT_AGENT_SANDBOX:=workspace-write}"
-: "${MATRIX_BOT_ENV_OUTPUT:=$SCRIPT_DIR/.bot.env}"
 
 : "${TRAEFIK_IMAGE:=traefik:v3}"
 : "${TUWUNEL_IMAGE:=ghcr.io/matrix-construct/tuwunel:latest}"
@@ -172,8 +163,6 @@ validate_apply_config() {
   require_nonempty HCLOUD_SSH_KEY_NAME
   require_file "$HCLOUD_SSH_PUBLIC_KEY_PATH"
   require_file "$HCLOUD_SSH_PRIVATE_KEY_PATH"
-  require_nonempty MATRIX_BOT_USERNAME
-  require_nonempty MATRIX_BOT_PASSWORD
 
   if [ "$MATRIX_ALLOW_REGISTRATION" = "true" ] && [ "$MATRIX_ALLOW_OPEN_REGISTRATION" != "true" ] && [ -z "$MATRIX_REGISTRATION_TOKEN" ]; then
     die "MATRIX_REGISTRATION_TOKEN is required when MATRIX_ALLOW_REGISTRATION=true and MATRIX_ALLOW_OPEN_REGISTRATION=false"
