@@ -68,6 +68,18 @@ Advanced overrides:
 EOF
 }
 
+cleanup_tmpdir() {
+  if [ -n "${tmpdir:-}" ] && [ -d "$tmpdir" ]; then
+    rm -rf "$tmpdir"
+  fi
+}
+
+handle_interrupt() {
+  trap - INT TERM EXIT
+  cleanup_tmpdir
+  exit 130
+}
+
 render_firewall_rules() {
   output_path=$1
 
@@ -162,6 +174,7 @@ server_name = "$MATRIX_SERVER_NAME"
 database_path = "/data"
 address = "0.0.0.0"
 port = 8008
+new_user_displayname_suffix = ""
 allow_federation = $MATRIX_ALLOW_FEDERATION
 federate_created_rooms = $MATRIX_FEDERATE_CREATED_ROOMS
 allow_encryption = $MATRIX_ALLOW_ENCRYPTION
@@ -194,6 +207,14 @@ client = "$MATRIX_WELL_KNOWN_CLIENT_URL"
 server = "$MATRIX_WELL_KNOWN_SERVER"
 EOF
   } >"$output_path"
+}
+
+render_deployment_identity_file() {
+  output_path=$1
+  cat >"$output_path" <<EOF
+MATRIX_SERVER_NAME=$MATRIX_SERVER_NAME
+MATRIX_BASE_HOST=$MATRIX_BASE_HOST_NO_DOT
+EOF
 }
 
 needs_registration_secret() {
@@ -293,6 +314,7 @@ render_bundle() {
 
   render_compose_file "$bundle_dir/docker-compose.yml"
   render_tuwunel_config "$bundle_dir/tuwunel.toml"
+  render_deployment_identity_file "$bundle_dir/deployment-identity.env"
   render_env_file "$bundle_dir/.env"
 
   if needs_registration_secret; then
@@ -301,6 +323,59 @@ render_bundle() {
   if needs_emergency_secret; then
     printf '%s\n' "$MATRIX_EMERGENCY_PASSWORD" >"$bundle_dir/emergency_password"
   fi
+}
+
+ensure_remote_identity_compatible() {
+  host_ip=$1
+
+  ssh_exec "$host_ip" \
+    "MATRIX_DATA_ROOT='$MATRIX_DATA_ROOT' TARGET_SERVER_NAME='$MATRIX_SERVER_NAME' TARGET_BASE_HOST='$MATRIX_BASE_HOST_NO_DOT' sh -s" <<'EOF'
+set -eu
+
+identity_file="$MATRIX_DATA_ROOT/deployment-identity.env"
+config_file="$MATRIX_DATA_ROOT/tuwunel/config/tuwunel.toml"
+compose_file="$MATRIX_DATA_ROOT/docker-compose.yml"
+data_dir="$MATRIX_DATA_ROOT/tuwunel/data"
+
+existing_server_name=""
+existing_base_host=""
+data_has_content=false
+
+if [ -f "$identity_file" ]; then
+  existing_server_name=$(sed -n 's/^MATRIX_SERVER_NAME=//p' "$identity_file" | sed -n '1p')
+  existing_base_host=$(sed -n 's/^MATRIX_BASE_HOST=//p' "$identity_file" | sed -n '1p')
+fi
+
+if [ -z "$existing_server_name" ] && [ -f "$config_file" ]; then
+  existing_server_name=$(sed -n 's/^server_name = "\(.*\)"$/\1/p' "$config_file" | sed -n '1p')
+fi
+
+if [ -z "$existing_base_host" ] && [ -f "$compose_file" ]; then
+  existing_base_host=$(sed -n 's/.*traefik\.http\.routers\.matrix\.rule=Host(`\([^`]*\)`).*/\1/p' "$compose_file" | sed -n '1p')
+fi
+
+if [ -d "$data_dir" ] && find "$data_dir" -mindepth 1 -print -quit | grep -q .; then
+  data_has_content=true
+fi
+
+if [ -n "$existing_server_name" ] && [ "$existing_server_name" != "$TARGET_SERVER_NAME" ]; then
+  echo "existing Matrix deployment uses server_name=$existing_server_name but apply requested server_name=$TARGET_SERVER_NAME" >&2
+  echo "destroy the server or clear $MATRIX_DATA_ROOT before changing MATRIX_SERVER_NAME" >&2
+  exit 1
+fi
+
+if [ -n "$existing_base_host" ] && [ "$existing_base_host" != "$TARGET_BASE_HOST" ]; then
+  echo "existing Matrix deployment uses base host=$existing_base_host but apply requested base host=$TARGET_BASE_HOST" >&2
+  echo "destroy the server or clear $MATRIX_DATA_ROOT before changing MATRIX_BASE_URL" >&2
+  exit 1
+fi
+
+if [ "$data_has_content" = true ] && [ -z "$existing_server_name" ] && [ -z "$existing_base_host" ]; then
+  echo "existing Matrix data found in $data_dir, but deployment identity could not be determined" >&2
+  echo "destroy the server or clear $MATRIX_DATA_ROOT before changing domains on a reused host" >&2
+  exit 1
+fi
+EOF
 }
 
 ensure_remote_base_system() {
@@ -352,6 +427,7 @@ set -eu
 
 install -m 644 "$STAGE_DIR/docker-compose.yml" "$MATRIX_DATA_ROOT/docker-compose.yml"
 install -m 644 "$STAGE_DIR/tuwunel.toml" "$MATRIX_DATA_ROOT/tuwunel/config/tuwunel.toml"
+install -m 644 "$STAGE_DIR/deployment-identity.env" "$MATRIX_DATA_ROOT/deployment-identity.env"
 install -m 600 "$STAGE_DIR/.env" "$MATRIX_DATA_ROOT/.env"
 
 if [ -f "$STAGE_DIR/registration_token" ]; then
@@ -368,6 +444,8 @@ fi
 
 docker compose --env-file "$MATRIX_DATA_ROOT/.env" -f "$MATRIX_DATA_ROOT/docker-compose.yml" pull
 docker compose --env-file "$MATRIX_DATA_ROOT/.env" -f "$MATRIX_DATA_ROOT/docker-compose.yml" up -d --remove-orphans
+# Always recreate tuwunel so bind-mounted config and secret changes take effect.
+docker compose --env-file "$MATRIX_DATA_ROOT/.env" -f "$MATRIX_DATA_ROOT/docker-compose.yml" up -d --force-recreate --no-deps tuwunel
 
 rm -rf "$STAGE_DIR"
 EOF
@@ -487,11 +565,14 @@ wait_for_origin_matrix_versions() {
   count=0
 
   while [ "$count" -lt "$attempts" ]; do
-    if ssh_exec "$host_ip" "curl -fsS --resolve '$MATRIX_BASE_HOST_NO_DOT:443:127.0.0.1' 'https://$MATRIX_BASE_HOST_NO_DOT/_matrix/client/versions' >/dev/null"; then
+    if ssh_exec "$host_ip" "curl -fsS --resolve '$MATRIX_BASE_HOST_NO_DOT:443:127.0.0.1' 'https://$MATRIX_BASE_HOST_NO_DOT/_matrix/client/versions' >/dev/null 2>&1"; then
       return 0
     fi
 
     count=$((count + 1))
+    if [ $((count % 10)) -eq 0 ] || [ "$count" -eq "$attempts" ]; then
+      log "apply: waiting for origin endpoint https://$MATRIX_BASE_HOST_NO_DOT/_matrix/client/versions ($count/$attempts)"
+    fi
     sleep 2
   done
 
@@ -505,7 +586,8 @@ verify_registration_flow() (
   password=$(openssl rand -base64 24 | tr -d '\n')
 
   tmpdir=$(mktemp -d)
-  trap 'rm -rf "$tmpdir"' EXIT INT TERM
+  trap cleanup_tmpdir EXIT
+  trap handle_interrupt INT TERM
 
   auth_type="m.login.dummy"
   auth_payload='{"type":"m.login.dummy"}'
@@ -578,7 +660,8 @@ run_apply() {
   log "apply: SSH key \"$HCLOUD_SSH_KEY_NAME\" is ready"
 
   tmpdir=$(mktemp -d)
-  trap 'rm -rf "$tmpdir"' EXIT INT TERM
+  trap cleanup_tmpdir EXIT
+  trap handle_interrupt INT TERM
 
   ensure_firewall_if_enabled "$tmpdir/firewall-rules.json"
   ensure_server_exists
@@ -595,12 +678,14 @@ run_apply() {
 
   ssh_wait_for_ready "$ipv4"
   ensure_remote_base_system "$ipv4"
+  ensure_remote_identity_compatible "$ipv4"
 
   bundle_dir="$tmpdir/bundle"
   mkdir -p "$bundle_dir"
   render_bundle "$bundle_dir"
   deploy_bundle "$ipv4" "$bundle_dir"
   if ! wait_for_origin_matrix_versions "$ipv4" 120; then
+    collect_remote_diagnostics "$ipv4"
     die "apply: matrix client API did not become ready on the origin listener"
   fi
 

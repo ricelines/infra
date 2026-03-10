@@ -3,7 +3,7 @@
 # Defaults for Hetzner resources.
 : "${HCLOUD_SERVER_NAME:=tuwunel-matrix}"
 : "${HCLOUD_SERVER_TYPE:=cx23}"
-: "${HCLOUD_SERVER_IMAGE:=debian-12}"
+: "${HCLOUD_SERVER_IMAGE:=debian-13}"
 # nbg1 is in Germany and part of Hetzner's eu-central network zone.
 : "${HCLOUD_SERVER_LOCATION:=nbg1}"
 # Additional Germany locations to try if capacity is temporarily unavailable.
