@@ -45,22 +45,11 @@
 : "${MATRIX_ALLOW_REGISTRATION:=true}"
 : "${MATRIX_ALLOW_OPEN_REGISTRATION:=false}"
 : "${MATRIX_REGISTRATION_TOKEN:=}"
-: "${MATRIX_ALLOW_GUEST_REGISTRATION:=false}"
-: "${MATRIX_ALLOW_FEDERATION:=false}"
-: "${MATRIX_FEDERATE_CREATED_ROOMS:=false}"
-: "${MATRIX_ALLOW_ENCRYPTION:=true}"
-: "${MATRIX_ENCRYPTION_DEFAULT_ROOM_TYPE:=all}"
-: "${MATRIX_GRANT_ADMIN_TO_FIRST_USER:=true}"
-: "${MATRIX_CREATE_ADMIN_ROOM:=true}"
-: "${MATRIX_FEDERATE_ADMIN_ROOM:=false}"
 : "${MATRIX_EMERGENCY_PASSWORD:=}"
 
 : "${TRAEFIK_IMAGE:=traefik:v3}"
 : "${TUWUNEL_IMAGE:=ghcr.io/matrix-construct/tuwunel:latest}"
 : "${MATRIX_DATA_ROOT:=/srv/matrix}"
-
-: "${MATRIX_WELL_KNOWN_CLIENT_URL:=}"
-: "${MATRIX_WELL_KNOWN_SERVER:=}"
 
 normalize_bool_var() {
   name=$1
@@ -128,13 +117,6 @@ derive_matrix_config() {
   if [ -z "$CLOUDFLARE_ZONE_NAME" ]; then
     CLOUDFLARE_ZONE_NAME=$MATRIX_SERVER_NAME
   fi
-
-  if [ -z "$MATRIX_WELL_KNOWN_CLIENT_URL" ]; then
-    MATRIX_WELL_KNOWN_CLIENT_URL=$MATRIX_BASE_URL
-  fi
-  if [ -z "$MATRIX_WELL_KNOWN_SERVER" ]; then
-    MATRIX_WELL_KNOWN_SERVER=$MATRIX_BASE_HOST_NO_DOT:443
-  fi
 }
 
 validate_apply_config() {
@@ -144,13 +126,6 @@ validate_apply_config() {
   normalize_bool_var CLOUDFLARE_DNS_PROXIED
   normalize_bool_var MATRIX_ALLOW_REGISTRATION
   normalize_bool_var MATRIX_ALLOW_OPEN_REGISTRATION
-  normalize_bool_var MATRIX_ALLOW_GUEST_REGISTRATION
-  normalize_bool_var MATRIX_ALLOW_FEDERATION
-  normalize_bool_var MATRIX_FEDERATE_CREATED_ROOMS
-  normalize_bool_var MATRIX_ALLOW_ENCRYPTION
-  normalize_bool_var MATRIX_GRANT_ADMIN_TO_FIRST_USER
-  normalize_bool_var MATRIX_CREATE_ADMIN_ROOM
-  normalize_bool_var MATRIX_FEDERATE_ADMIN_ROOM
 
   require_nonempty MATRIX_SERVER_NAME
   derive_matrix_config

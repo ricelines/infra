@@ -166,47 +166,47 @@ ensure_cloudflare_dns_if_enabled() {
 
 render_tuwunel_config() {
   output_path=$1
+  template_path=$SCRIPT_DIR/tuwunel.toml.template
 
-  {
-    cat <<EOF
-[global]
-server_name = "$MATRIX_SERVER_NAME"
-database_path = "/data"
-address = "0.0.0.0"
-port = 8008
-new_user_displayname_suffix = ""
-allow_federation = $MATRIX_ALLOW_FEDERATION
-federate_created_rooms = $MATRIX_FEDERATE_CREATED_ROOMS
-allow_encryption = $MATRIX_ALLOW_ENCRYPTION
-encryption_enabled_by_default_for_room_type = "$MATRIX_ENCRYPTION_DEFAULT_ROOM_TYPE"
-allow_guest_registration = $MATRIX_ALLOW_GUEST_REGISTRATION
-grant_admin_to_first_user = $MATRIX_GRANT_ADMIN_TO_FIRST_USER
-create_admin_room = $MATRIX_CREATE_ADMIN_ROOM
-federate_admin_room = $MATRIX_FEDERATE_ADMIN_ROOM
-EOF
+  require_file "$template_path"
 
-    if [ "$MATRIX_ALLOW_REGISTRATION" = "true" ]; then
-      printf '%s\n' "allow_registration = true"
-      if [ "$MATRIX_ALLOW_OPEN_REGISTRATION" = "true" ]; then
-        printf '%s\n' "yes_i_am_very_very_sure_i_want_an_open_registration_server_prone_to_abuse = true"
-      else
-        printf '%s\n' "registration_token_file = \"/run/secrets/registration_token\""
-      fi
-    else
-      printf '%s\n' "allow_registration = false"
-    fi
+  awk \
+    -v matrix_server_name="$MATRIX_SERVER_NAME" \
+    -v matrix_allow_registration="$MATRIX_ALLOW_REGISTRATION" \
+    -v matrix_allow_open_registration="$MATRIX_ALLOW_OPEN_REGISTRATION" \
+    -v has_emergency_password="$([ -n "$MATRIX_EMERGENCY_PASSWORD" ] && printf 'true' || printf 'false')" \
+    -v matrix_base_url="$MATRIX_BASE_URL" \
+    -v matrix_base_host_no_dot="$MATRIX_BASE_HOST_NO_DOT" \
+    '
+      {
+        if ($0 == "@REGISTRATION_CONFIG@") {
+          if (matrix_allow_registration == "true") {
+            print "allow_registration = true"
+            if (matrix_allow_open_registration == "true") {
+              print "yes_i_am_very_very_sure_i_want_an_open_registration_server_prone_to_abuse = true"
+            } else {
+              print "registration_token_file = \"/run/secrets/registration_token\""
+            }
+          } else {
+            print "allow_registration = false"
+          }
+          next
+        }
 
-    if [ -n "$MATRIX_EMERGENCY_PASSWORD" ]; then
-      printf '%s\n' "emergency_password_file = \"/run/secrets/emergency_password\""
-    fi
+        if ($0 == "@EMERGENCY_PASSWORD_CONFIG@") {
+          if (has_emergency_password == "true") {
+            print "emergency_password_file = \"/run/secrets/emergency_password\""
+          }
+          next
+        }
 
-    cat <<EOF
-
-[global.well_known]
-client = "$MATRIX_WELL_KNOWN_CLIENT_URL"
-server = "$MATRIX_WELL_KNOWN_SERVER"
-EOF
-  } >"$output_path"
+        gsub(/@MATRIX_SERVER_NAME@/, matrix_server_name)
+        gsub(/@MATRIX_BASE_URL@/, matrix_base_url)
+        gsub(/@MATRIX_BASE_HOST_NO_DOT@/, matrix_base_host_no_dot)
+        print
+      }
+    ' \
+    "$template_path" >"$output_path"
 }
 
 render_deployment_identity_file() {
