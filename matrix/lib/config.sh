@@ -49,6 +49,7 @@
 
 : "${TRAEFIK_IMAGE:=traefik:v3}"
 : "${TUWUNEL_IMAGE:=ghcr.io/matrix-construct/tuwunel:latest}"
+: "${AMBER_MANAGER_IMAGE:=ghcr.io/rdi-foundation/amber-manager:v0.1}"
 : "${MATRIX_DATA_ROOT:=/srv/matrix}"
 
 normalize_bool_var() {

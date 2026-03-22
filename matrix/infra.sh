@@ -65,6 +65,10 @@ Advanced overrides:
   HCLOUD_SSH_PUBLIC_KEY_PATH   default: $HCLOUD_SSH_PUBLIC_KEY_PATH
   HCLOUD_SSH_PRIVATE_KEY_PATH  default: derived from public key path
   HCLOUD_SSH_KNOWN_HOSTS_FILE  default: $HCLOUD_SSH_KNOWN_HOSTS_FILE
+  TRAEFIK_IMAGE                default: $TRAEFIK_IMAGE
+  TUWUNEL_IMAGE                default: $TUWUNEL_IMAGE
+  AMBER_MANAGER_IMAGE          default: $AMBER_MANAGER_IMAGE
+  MATRIX_DATA_ROOT             default: $MATRIX_DATA_ROOT
 EOF
 }
 
@@ -209,6 +213,31 @@ render_tuwunel_config() {
     "$template_path" >"$output_path"
 }
 
+render_manager_config() {
+  output_path=$1
+
+  jq -n '
+    {
+      bindable_services: {
+        "matrix": {
+          protocol: "http",
+          provider: {
+            kind: "loopback_upstream",
+            upstream: "127.0.0.1:8008",
+          },
+        },
+        "amber-manager-api": {
+          protocol: "http",
+          provider: {
+            kind: "loopback_upstream",
+            upstream: "127.0.0.1:4100",
+          },
+        },
+      },
+    }
+  ' >"$output_path"
+}
+
 render_deployment_identity_file() {
   output_path=$1
   cat >"$output_path" <<EOF
@@ -262,6 +291,8 @@ services:
     restart: unless-stopped
     environment:
       - TUWUNEL_CONFIG=/etc/tuwunel/tuwunel.toml
+    ports:
+      - "127.0.0.1:8008:8008"
     volumes:
       - ./tuwunel/config:/etc/tuwunel:ro
       - ./tuwunel/data:/data
@@ -285,6 +316,23 @@ EOF
       - traefik.http.routers.matrix.tls=true
       - traefik.http.routers.matrix.tls.certresolver=le
       - traefik.http.services.matrix.loadbalancer.server.port=8008
+
+  amber-manager:
+    image: $AMBER_MANAGER_IMAGE
+    container_name: amber-manager
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - --listen
+      - 127.0.0.1:4100
+      - --data-dir
+      - /var/lib/amber-manager
+      - --config
+      - /etc/amber-manager/manager-config.json
+    volumes:
+      - ./amber-manager/data:/var/lib/amber-manager
+      - ./amber-manager/config:/etc/amber-manager:ro
+      - /var/run/docker.sock:/var/run/docker.sock
 EOF
 
     if needs_registration_secret || needs_emergency_secret; then
@@ -314,6 +362,7 @@ render_bundle() {
 
   render_compose_file "$bundle_dir/docker-compose.yml"
   render_tuwunel_config "$bundle_dir/tuwunel.toml"
+  render_manager_config "$bundle_dir/manager-config.json"
   render_deployment_identity_file "$bundle_dir/deployment-identity.env"
   render_env_file "$bundle_dir/.env"
 
@@ -385,6 +434,11 @@ ensure_remote_base_system() {
 set -eu
 export DEBIAN_FRONTEND=noninteractive
 
+if ! command -v curl >/dev/null 2>&1; then
+  apt-get update
+  apt-get install -y ca-certificates curl
+fi
+
 if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1; then
   apt-get update
   apt-get install -y ca-certificates curl gnupg
@@ -408,10 +462,18 @@ install -d -m 750 "$MATRIX_DATA_ROOT"
 install -d -m 755 "$MATRIX_DATA_ROOT/traefik/acme"
 install -d -m 755 "$MATRIX_DATA_ROOT/tuwunel/config"
 install -d -m 755 "$MATRIX_DATA_ROOT/tuwunel/data"
+install -d -m 755 "$MATRIX_DATA_ROOT/amber-manager/config"
+install -d -m 700 "$MATRIX_DATA_ROOT/amber-manager/data"
+install -d -m 700 "$MATRIX_DATA_ROOT/bootstrap"
+install -d -m 700 "$MATRIX_DATA_ROOT/codex"
 install -d -m 700 "$MATRIX_DATA_ROOT/secrets"
 install -d -m 755 "$MATRIX_DATA_ROOT/backups"
 touch "$MATRIX_DATA_ROOT/traefik/acme/acme.json"
 chmod 600 "$MATRIX_DATA_ROOT/traefik/acme/acme.json"
+if [ ! -f "$MATRIX_DATA_ROOT/bootstrap/state.json" ]; then
+  printf '%s\n' '{}' >"$MATRIX_DATA_ROOT/bootstrap/state.json"
+  chmod 600 "$MATRIX_DATA_ROOT/bootstrap/state.json"
+fi
 EOF
 }
 
@@ -427,6 +489,7 @@ set -eu
 
 install -m 644 "$STAGE_DIR/docker-compose.yml" "$MATRIX_DATA_ROOT/docker-compose.yml"
 install -m 644 "$STAGE_DIR/tuwunel.toml" "$MATRIX_DATA_ROOT/tuwunel/config/tuwunel.toml"
+install -m 644 "$STAGE_DIR/manager-config.json" "$MATRIX_DATA_ROOT/amber-manager/config/manager-config.json"
 install -m 644 "$STAGE_DIR/deployment-identity.env" "$MATRIX_DATA_ROOT/deployment-identity.env"
 install -m 600 "$STAGE_DIR/.env" "$MATRIX_DATA_ROOT/.env"
 
@@ -446,9 +509,51 @@ docker compose --env-file "$MATRIX_DATA_ROOT/.env" -f "$MATRIX_DATA_ROOT/docker-
 docker compose --env-file "$MATRIX_DATA_ROOT/.env" -f "$MATRIX_DATA_ROOT/docker-compose.yml" up -d --remove-orphans
 # Always recreate tuwunel so bind-mounted config and secret changes take effect.
 docker compose --env-file "$MATRIX_DATA_ROOT/.env" -f "$MATRIX_DATA_ROOT/docker-compose.yml" up -d --force-recreate --no-deps tuwunel
+# Always recreate amber-manager so bind-mounted config changes take effect.
+docker compose --env-file "$MATRIX_DATA_ROOT/.env" -f "$MATRIX_DATA_ROOT/docker-compose.yml" up -d --force-recreate --no-deps amber-manager
 
 rm -rf "$STAGE_DIR"
 EOF
+}
+
+wait_for_loopback_matrix_versions() {
+  host_ip=$1
+  attempts=${2:-90}
+  count=0
+
+  while [ "$count" -lt "$attempts" ]; do
+    if ssh_exec "$host_ip" "curl -fsS 'http://127.0.0.1:8008/_matrix/client/versions' >/dev/null 2>&1"; then
+      return 0
+    fi
+
+    count=$((count + 1))
+    if [ $((count % 10)) -eq 0 ] || [ "$count" -eq "$attempts" ]; then
+      log "apply: waiting for loopback Matrix endpoint http://127.0.0.1:8008/_matrix/client/versions ($count/$attempts)"
+    fi
+    sleep 2
+  done
+
+  return 1
+}
+
+wait_for_remote_manager_ready() {
+  host_ip=$1
+  attempts=${2:-90}
+  count=0
+
+  while [ "$count" -lt "$attempts" ]; do
+    if ssh_exec "$host_ip" "curl -fsS 'http://127.0.0.1:4100/readyz' >/dev/null 2>&1"; then
+      return 0
+    fi
+
+    count=$((count + 1))
+    if [ $((count % 10)) -eq 0 ] || [ "$count" -eq "$attempts" ]; then
+      log "apply: waiting for amber-manager readiness at http://127.0.0.1:4100/readyz ($count/$attempts)"
+    fi
+    sleep 2
+  done
+
+  return 1
 }
 
 check_public_matrix_versions() {
@@ -490,8 +595,19 @@ check_remote_stack_state() {
     map({service: .Service, state: .State}) as $rows
     | ($rows | any(.service == "traefik" and .state == "running"))
       and ($rows | any(.service == "tuwunel" and .state == "running"))
+      and ($rows | any(.service == "amber-manager" and .state == "running"))
   ' >/dev/null 2>&1; then
-    log "verify: stack state check failed; traefik/tuwunel are not both running"
+    log "verify: stack state check failed; traefik/tuwunel/amber-manager are not all running"
+    return 1
+  fi
+
+  if ! ssh_exec "$host_ip" "curl -fsS 'http://127.0.0.1:8008/_matrix/client/versions' >/dev/null"; then
+    log "verify: loopback Matrix endpoint is not healthy on 127.0.0.1:8008"
+    return 1
+  fi
+
+  if ! ssh_exec "$host_ip" "curl -fsS 'http://127.0.0.1:4100/readyz' >/dev/null"; then
+    log "verify: amber-manager readiness endpoint is not healthy on 127.0.0.1:4100"
     return 1
   fi
 
@@ -519,6 +635,8 @@ collect_remote_diagnostics() {
     docker compose -f '$MATRIX_DATA_ROOT/docker-compose.yml' --env-file '$MATRIX_DATA_ROOT/.env' logs --tail=200 traefik
     echo '--- tuwunel logs ---'
     docker compose -f '$MATRIX_DATA_ROOT/docker-compose.yml' --env-file '$MATRIX_DATA_ROOT/.env' logs --tail=200 tuwunel
+    echo '--- amber-manager logs ---'
+    docker compose -f '$MATRIX_DATA_ROOT/docker-compose.yml' --env-file '$MATRIX_DATA_ROOT/.env' logs --tail=200 amber-manager
   " || true
 }
 
@@ -684,6 +802,14 @@ run_apply() {
   mkdir -p "$bundle_dir"
   render_bundle "$bundle_dir"
   deploy_bundle "$ipv4" "$bundle_dir"
+  if ! wait_for_loopback_matrix_versions "$ipv4" 120; then
+    collect_remote_diagnostics "$ipv4"
+    die "apply: Matrix client API did not become ready on loopback 127.0.0.1:8008"
+  fi
+  if ! wait_for_remote_manager_ready "$ipv4" 120; then
+    collect_remote_diagnostics "$ipv4"
+    die "apply: amber-manager did not become ready on loopback 127.0.0.1:4100"
+  fi
   if ! wait_for_origin_matrix_versions "$ipv4" 120; then
     collect_remote_diagnostics "$ipv4"
     die "apply: matrix client API did not become ready on the origin listener"
