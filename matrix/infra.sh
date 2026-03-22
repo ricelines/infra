@@ -42,6 +42,7 @@ Core environment:
   HCLOUD_SERVER_IMAGE          default: $HCLOUD_SERVER_IMAGE
   HCLOUD_SERVER_LOCATION       default: $HCLOUD_SERVER_LOCATION
   HCLOUD_SERVER_LOCATION_FALLBACKS  default: $HCLOUD_SERVER_LOCATION_FALLBACKS
+  HCLOUD_SERVER_BACKUPS_ENABLE default: $HCLOUD_SERVER_BACKUPS_ENABLE
 
   SSH keypair                  defaults to ~/.ssh/id_ed25519(.pub)
   HCLOUD_SSH_ALLOWED_NETS      default: $HCLOUD_SSH_ALLOWED_NETS
@@ -57,6 +58,7 @@ Core environment:
 Optional security + behavior:
   HCLOUD_FIREWALL_ENABLE       default: $HCLOUD_FIREWALL_ENABLE
   HCLOUD_HTTP_ALLOW_CLOUDFLARE_ONLY default: $HCLOUD_HTTP_ALLOW_CLOUDFLARE_ONLY
+  HCLOUD_SERVER_BACKUPS_ENABLE default: $HCLOUD_SERVER_BACKUPS_ENABLE
   CLOUDFLARE_MANAGE_DNS        default: $CLOUDFLARE_MANAGE_DNS
 
 Advanced overrides:
@@ -155,6 +157,31 @@ ensure_server_exists() {
   if [ -n "${created_location:-}" ]; then
     log "apply: server \"$HCLOUD_SERVER_NAME\" created in location $created_location"
   fi
+}
+
+ensure_server_backups_reconciled() {
+  if ! hcloud_server_exists "$HCLOUD_SERVER_NAME"; then
+    die "apply: cannot reconcile backups because server \"$HCLOUD_SERVER_NAME\" does not exist"
+  fi
+
+  before_state=false
+  if hcloud_server_backups_enabled "$HCLOUD_SERVER_NAME"; then
+    before_state=true
+  fi
+
+  hcloud_reconcile_server_backups "$HCLOUD_SERVER_NAME" "$HCLOUD_SERVER_BACKUPS_ENABLE"
+
+  after_state=false
+  if hcloud_server_backups_enabled "$HCLOUD_SERVER_NAME"; then
+    after_state=true
+  fi
+
+  if [ "$before_state" != "$after_state" ]; then
+    log "apply: server backups for \"$HCLOUD_SERVER_NAME\" changed from $before_state to $after_state"
+    return 0
+  fi
+
+  log "apply: server backups for \"$HCLOUD_SERVER_NAME\" already set to $after_state"
 }
 
 ensure_cloudflare_dns_if_enabled() {
@@ -786,6 +813,7 @@ run_apply() {
 
   ipv4=$(hcloud_wait_for_ipv4 "$HCLOUD_SERVER_NAME")
   log "apply: server \"$HCLOUD_SERVER_NAME\" is ready with public IPv4 $ipv4"
+  ensure_server_backups_reconciled
 
   if [ "$HCLOUD_FIREWALL_ENABLE" = "true" ]; then
     hcloud_attach_firewall_to_server "$HCLOUD_FIREWALL_NAME" "$HCLOUD_SERVER_NAME"

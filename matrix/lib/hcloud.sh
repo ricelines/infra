@@ -46,6 +46,39 @@ hcloud_server_ipv4() {
   '
 }
 
+hcloud_server_backups_enabled() {
+  hcloud server describe "$1" -o json | jq -e '
+    if type == "array" then .[0] else . end
+    | (.backup_window // "") != ""
+  ' >/dev/null
+}
+
+hcloud_enable_server_backups() {
+  hcloud server enable-backup "$1" >/dev/null
+}
+
+hcloud_disable_server_backups() {
+  hcloud server disable-backup "$1" >/dev/null
+}
+
+hcloud_reconcile_server_backups() {
+  server_name=$1
+  enable_backups=$2
+
+  if [ "$enable_backups" = "true" ]; then
+    if hcloud_server_backups_enabled "$server_name"; then
+      return 0
+    fi
+    hcloud_enable_server_backups "$server_name"
+    return 0
+  fi
+
+  if ! hcloud_server_backups_enabled "$server_name"; then
+    return 0
+  fi
+  hcloud_disable_server_backups "$server_name"
+}
+
 hcloud_wait_for_ipv4() {
   attempts=0
   max_attempts=60
@@ -154,6 +187,7 @@ hcloud_create_server() {
       --type "$type" \
       --image "$image" \
       --location "$location" \
+      --enable-backup="$HCLOUD_SERVER_BACKUPS_ENABLE" \
       --ssh-key "$HCLOUD_SSH_KEY_NAME" \
       --firewall "$HCLOUD_FIREWALL_NAME" \
       --label "$HCLOUD_LABEL_MANAGED_BY_KEY=$HCLOUD_LABEL_MANAGED_BY_VALUE" \
@@ -167,6 +201,7 @@ hcloud_create_server() {
     --type "$type" \
     --image "$image" \
     --location "$location" \
+    --enable-backup="$HCLOUD_SERVER_BACKUPS_ENABLE" \
     --ssh-key "$HCLOUD_SSH_KEY_NAME" \
     --label "$HCLOUD_LABEL_MANAGED_BY_KEY=$HCLOUD_LABEL_MANAGED_BY_VALUE" \
     --label "$HCLOUD_LABEL_STACK_KEY=$HCLOUD_LABEL_STACK_VALUE" \

@@ -8,6 +8,7 @@
 : "${HCLOUD_SERVER_LOCATION:=nbg1}"
 # Additional Germany locations to try if capacity is temporarily unavailable.
 : "${HCLOUD_SERVER_LOCATION_FALLBACKS:=fsn1}"
+: "${HCLOUD_SERVER_BACKUPS_ENABLE:=false}"
 
 # Optional management resources.
 : "${HCLOUD_FIREWALL_ENABLE:=true}"
@@ -122,6 +123,7 @@ derive_matrix_config() {
 
 validate_apply_config() {
   normalize_bool_var HCLOUD_FIREWALL_ENABLE
+  normalize_bool_var HCLOUD_SERVER_BACKUPS_ENABLE
   normalize_bool_var HCLOUD_HTTP_ALLOW_CLOUDFLARE_ONLY
   normalize_bool_var CLOUDFLARE_MANAGE_DNS
   normalize_bool_var CLOUDFLARE_DNS_PROXIED
@@ -147,6 +149,7 @@ validate_apply_config() {
 
 validate_destroy_config() {
   normalize_bool_var HCLOUD_FIREWALL_ENABLE
+  normalize_bool_var HCLOUD_SERVER_BACKUPS_ENABLE
   normalize_bool_var HCLOUD_HTTP_ALLOW_CLOUDFLARE_ONLY
   normalize_bool_var CLOUDFLARE_MANAGE_DNS
 
