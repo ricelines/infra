@@ -17,9 +17,12 @@ encryption_enabled_by_default_for_room_type = "all"
 allow_federation = false
 federate_created_rooms = false
 
-grant_admin_to_first_user = true
+auto_join_rooms = ["#welcome:@MATRIX_SERVER_NAME@"]
+
+grant_admin_to_first_user = false
 create_admin_room = true
 federate_admin_room = false
+@ADMIN_BOOTSTRAP_CONFIG@
 
 @REGISTRATION_CONFIG@
 @EMERGENCY_PASSWORD_CONFIG@

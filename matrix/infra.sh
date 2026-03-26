@@ -49,6 +49,8 @@ Core environment:
 
   MATRIX_BASE_URL              required
   MATRIX_SERVER_NAME           required
+  MATRIX_ADMIN_USERNAME        default: $MATRIX_ADMIN_USERNAME
+  MATRIX_ADMIN_PASSWORD        required
   MATRIX_LETSENCRYPT_EMAIL     derived as letsencrypt@MATRIX_SERVER_NAME
   MATRIX_REGISTRATION_TOKEN    required unless open registration is enabled
 
@@ -203,6 +205,9 @@ render_tuwunel_config() {
 
   awk \
     -v matrix_server_name="$MATRIX_SERVER_NAME" \
+    -v matrix_admin_username="$MATRIX_ADMIN_USERNAME" \
+    -v matrix_admin_password="$MATRIX_ADMIN_PASSWORD" \
+    -v matrix_admin_execute_extra="$MATRIX_ADMIN_EXECUTE_EXTRA" \
     -v matrix_allow_registration="$MATRIX_ALLOW_REGISTRATION" \
     -v matrix_allow_open_registration="$MATRIX_ALLOW_OPEN_REGISTRATION" \
     -v has_emergency_password="$([ -n "$MATRIX_EMERGENCY_PASSWORD" ] && printf 'true' || printf 'false')" \
@@ -221,6 +226,24 @@ render_tuwunel_config() {
           } else {
             print "allow_registration = false"
           }
+          next
+        }
+
+        if ($0 == "@ADMIN_BOOTSTRAP_CONFIG@") {
+          extra_count = split(matrix_admin_execute_extra, extra_commands, /__NQSEP__/)
+          print "admin_execute = ["
+          printf "  \"users create_user %s %s\",\n", matrix_admin_username, matrix_admin_password
+          printf "  \"users reset_password %s %s\",\n", matrix_admin_username, matrix_admin_password
+          printf "  \"users make_user_admin %s\"", matrix_admin_username
+          for (i = 1; i <= extra_count; i++) {
+            if (extra_commands[i] == "") {
+              continue
+            }
+            printf ",\n  \"%s\"", extra_commands[i]
+          }
+          printf "\n"
+          print "]"
+          print "admin_execute_errors_ignore = true"
           next
         }
 
@@ -515,7 +538,7 @@ deploy_bundle() {
 set -eu
 
 install -m 644 "$STAGE_DIR/docker-compose.yml" "$MATRIX_DATA_ROOT/docker-compose.yml"
-install -m 644 "$STAGE_DIR/tuwunel.toml" "$MATRIX_DATA_ROOT/tuwunel/config/tuwunel.toml"
+install -m 600 "$STAGE_DIR/tuwunel.toml" "$MATRIX_DATA_ROOT/tuwunel/config/tuwunel.toml"
 install -m 644 "$STAGE_DIR/manager-config.json" "$MATRIX_DATA_ROOT/amber-manager/config/manager-config.json"
 install -m 644 "$STAGE_DIR/deployment-identity.env" "$MATRIX_DATA_ROOT/deployment-identity.env"
 install -m 600 "$STAGE_DIR/.env" "$MATRIX_DATA_ROOT/.env"
@@ -704,6 +727,32 @@ EOF
   printf '%s\n' "$status" >"$status_file"
 }
 
+verify_admin_login_flow() (
+  login_url="$MATRIX_BASE_URL/_matrix/client/v3/login"
+
+  tmpdir=$(mktemp -d)
+  trap cleanup_tmpdir EXIT
+  trap handle_interrupt INT TERM
+
+  login_payload=$(jq -cn \
+    --arg user "@$MATRIX_ADMIN_USERNAME:$MATRIX_SERVER_NAME" \
+    --arg password "$MATRIX_ADMIN_PASSWORD" \
+    '{
+      type: "m.login.password",
+      identifier: { type: "m.id.user", user: $user },
+      password: $password
+    }')
+
+  http_post_json "$login_url" "$login_payload" "$tmpdir/login.json" "$tmpdir/login.status"
+  login_status=$(cat "$tmpdir/login.status")
+  [ "$login_status" = "200" ] || die "verify: admin login probe failed with HTTP $login_status"
+
+  token=$(jq -r '.access_token // empty' "$tmpdir/login.json")
+  [ -n "$token" ] || die "verify: admin login probe did not return an access token"
+
+  log "verify: admin login probe succeeded for @$MATRIX_ADMIN_USERNAME:$MATRIX_SERVER_NAME"
+)
+
 wait_for_origin_matrix_versions() {
   host_ip=$1
   attempts=${2:-90}
@@ -843,6 +892,14 @@ run_apply() {
     die "apply: matrix client API did not become ready on the origin listener"
   fi
 
+  MATRIX_VERIFY_REMOTE_HOST_IP=$ipv4
+  if ! verify_admin_login_flow; then
+    unset MATRIX_VERIFY_REMOTE_HOST_IP
+    collect_remote_diagnostics "$ipv4"
+    die "apply: explicit admin login probe failed"
+  fi
+  unset MATRIX_VERIFY_REMOTE_HOST_IP
+
   log "apply: matrix deployment is reconciled for $MATRIX_BASE_URL (origin IPv4: $ipv4)"
 }
 
@@ -875,6 +932,14 @@ run_verify() {
     collect_remote_diagnostics "$host_ip"
     die "verify: public endpoint checks failed"
   fi
+
+  MATRIX_VERIFY_REMOTE_HOST_IP=$host_ip
+  if ! verify_admin_login_flow; then
+    unset MATRIX_VERIFY_REMOTE_HOST_IP
+    collect_remote_diagnostics "$host_ip"
+    die "verify: explicit admin login probe failed"
+  fi
+  unset MATRIX_VERIFY_REMOTE_HOST_IP
 
   if [ "$MATRIX_ALLOW_REGISTRATION" = "true" ]; then
     if ! command -v openssl >/dev/null 2>&1; then

@@ -46,6 +46,9 @@
 : "${MATRIX_ALLOW_REGISTRATION:=true}"
 : "${MATRIX_ALLOW_OPEN_REGISTRATION:=false}"
 : "${MATRIX_REGISTRATION_TOKEN:=}"
+: "${MATRIX_ADMIN_USERNAME:=admin}"
+: "${MATRIX_ADMIN_PASSWORD:=}"
+: "${MATRIX_ADMIN_EXECUTE_EXTRA:=}"
 : "${MATRIX_EMERGENCY_PASSWORD:=}"
 
 : "${TRAEFIK_IMAGE:=traefik:v3}"
@@ -135,6 +138,8 @@ validate_apply_config() {
   derive_ssh_config
   # shellcheck disable=SC2034
   MATRIX_LETSENCRYPT_EMAIL="letsencrypt@$MATRIX_SERVER_NAME"
+  require_nonempty MATRIX_ADMIN_USERNAME
+  require_nonempty MATRIX_ADMIN_PASSWORD
 
   require_nonempty CLOUDFLARE_API_TOKEN
 
@@ -168,6 +173,8 @@ validate_verify_config() {
   require_nonempty MATRIX_SERVER_NAME
   derive_matrix_config
   derive_ssh_config
+  require_nonempty MATRIX_ADMIN_USERNAME
+  require_nonempty MATRIX_ADMIN_PASSWORD
 
   if [ "$MATRIX_ALLOW_REGISTRATION" = "true" ] && [ "$MATRIX_ALLOW_OPEN_REGISTRATION" != "true" ] && [ -z "$MATRIX_REGISTRATION_TOKEN" ]; then
     die "MATRIX_REGISTRATION_TOKEN is required when MATRIX_ALLOW_REGISTRATION=true and MATRIX_ALLOW_OPEN_REGISTRATION=false"
