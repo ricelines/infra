@@ -88,7 +88,9 @@ CURRENT_ONBOARDING_SCENARIO_ID=
 CURRENT_BOOTSTRAP_ADMIN_USER_ID=
 CURRENT_ROOM_JOIN_RULE=
 CURRENT_ROOM_DIRECTORY_VISIBILITY=
+CURRENT_ROOM_EVENTS_DEFAULT=
 CURRENT_ROOM_MESSAGE_POWER_LEVEL=
+CURRENT_ROOM_REACTION_POWER_LEVEL=
 CURRENT_ROOM_USERS_DEFAULT=
 CURRENT_ROOM_ADMIN_POWER_LEVEL=
 CURRENT_ROOM_ONBOARDING_BOT_POWER_LEVEL=
@@ -778,9 +780,7 @@ write_welcome_room_power_levels_payload() {
       },
       users_default: 0,
       state_default: 50,
-      events: {
-        "m.room.message": 50
-      }
+      events_default: 50
     }' >"$output_path"
 }
 
@@ -1902,7 +1902,7 @@ load_room_directory_visibility() {
   [ -n "$CURRENT_ROOM_DIRECTORY_VISIBILITY" ] || die "onboarding: room $room_id directory visibility response was missing visibility"
 }
 
-load_room_message_power_policy() {
+load_room_event_power_policy() {
   room_id=$1
   admin_user_id=$2
   onboarding_bot_user_id=$3
@@ -1913,7 +1913,9 @@ load_room_message_power_policy() {
   matrix_api_get_to_file "$MATRIX_BASE_URL/_matrix/client/v3/rooms/$(uri_encode "$room_id")/state/m.room.power_levels/" "$access_token" "$response_path" "$status_path"
   expect_http_success "$status_path" "$response_path" "onboarding: load room power levels for $room_id"
 
+  CURRENT_ROOM_EVENTS_DEFAULT=$(jq -r '.events_default // 0' "$response_path")
   CURRENT_ROOM_MESSAGE_POWER_LEVEL=$(jq -r '.events["m.room.message"] // .events_default // 0' "$response_path")
+  CURRENT_ROOM_REACTION_POWER_LEVEL=$(jq -r '.events["m.reaction"] // .events_default // 0' "$response_path")
   CURRENT_ROOM_USERS_DEFAULT=$(jq -r '.users_default // 0' "$response_path")
   CURRENT_ROOM_ADMIN_POWER_LEVEL=$(jq -r --arg user_id "$admin_user_id" '(.users[$user_id] // .users_default // 0)' "$response_path")
   CURRENT_ROOM_ONBOARDING_BOT_POWER_LEVEL=$(jq -r --arg user_id "$onboarding_bot_user_id" '(.users[$user_id] // .users_default // 0)' "$response_path")
@@ -2291,14 +2293,18 @@ verify_matrix_product_state() {
   load_room_directory_visibility "$CURRENT_WELCOME_ROOM_ID" "$CURRENT_BOOTSTRAP_ADMIN_ACCESS_TOKEN"
   [ "$CURRENT_ROOM_DIRECTORY_VISIBILITY" = "public" ] || die "onboarding: welcome room $CURRENT_WELCOME_ROOM_ID has directory visibility $CURRENT_ROOM_DIRECTORY_VISIBILITY, want public"
 
-  load_room_message_power_policy \
+  load_room_event_power_policy \
     "$CURRENT_WELCOME_ROOM_ID" \
     "$CURRENT_BOOTSTRAP_ADMIN_USER_ID" \
     "$CURRENT_ONBOARDING_BOT_USER_ID" \
     "$CURRENT_BOOTSTRAP_ADMIN_ACCESS_TOKEN"
+  [ "$CURRENT_ROOM_USERS_DEFAULT" -lt "$CURRENT_ROOM_EVENTS_DEFAULT" ] || die "onboarding: welcome room $CURRENT_WELCOME_ROOM_ID still allows ordinary users to send default events (users_default=$CURRENT_ROOM_USERS_DEFAULT, events_default=$CURRENT_ROOM_EVENTS_DEFAULT)"
   [ "$CURRENT_ROOM_USERS_DEFAULT" -lt "$CURRENT_ROOM_MESSAGE_POWER_LEVEL" ] || die "onboarding: welcome room $CURRENT_WELCOME_ROOM_ID still allows ordinary users to send messages (users_default=$CURRENT_ROOM_USERS_DEFAULT, m.room.message=$CURRENT_ROOM_MESSAGE_POWER_LEVEL)"
+  [ "$CURRENT_ROOM_USERS_DEFAULT" -lt "$CURRENT_ROOM_REACTION_POWER_LEVEL" ] || die "onboarding: welcome room $CURRENT_WELCOME_ROOM_ID still allows ordinary users to send reactions (users_default=$CURRENT_ROOM_USERS_DEFAULT, m.reaction=$CURRENT_ROOM_REACTION_POWER_LEVEL)"
   [ "$CURRENT_ROOM_ADMIN_POWER_LEVEL" -ge "$CURRENT_ROOM_MESSAGE_POWER_LEVEL" ] || die "onboarding: server admin $CURRENT_BOOTSTRAP_ADMIN_USER_ID cannot send welcome-room messages after power-level reconciliation"
+  [ "$CURRENT_ROOM_ADMIN_POWER_LEVEL" -ge "$CURRENT_ROOM_REACTION_POWER_LEVEL" ] || die "onboarding: server admin $CURRENT_BOOTSTRAP_ADMIN_USER_ID cannot send welcome-room reactions after power-level reconciliation"
   [ "$CURRENT_ROOM_ONBOARDING_BOT_POWER_LEVEL" -ge "$CURRENT_ROOM_MESSAGE_POWER_LEVEL" ] || die "onboarding: onboarding bot $CURRENT_ONBOARDING_BOT_USER_ID cannot send the welcome message after power-level reconciliation"
+  [ "$CURRENT_ROOM_ONBOARDING_BOT_POWER_LEVEL" -ge "$CURRENT_ROOM_REACTION_POWER_LEVEL" ] || die "onboarding: onboarding bot $CURRENT_ONBOARDING_BOT_USER_ID cannot send welcome-room reactions after power-level reconciliation"
 
   room_is_onboarding_managed_welcome_room "$CURRENT_WELCOME_ROOM_ID" "$CURRENT_BOOTSTRAP_ADMIN_ACCESS_TOKEN" || {
     die "onboarding: welcome room $CURRENT_WELCOME_ROOM_ID is missing the infra ownership marker"
