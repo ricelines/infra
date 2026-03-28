@@ -489,6 +489,19 @@ if ! command -v curl >/dev/null 2>&1; then
   apt-get install -y ca-certificates curl
 fi
 
+missing_debug_packages=""
+if ! command -v jq >/dev/null 2>&1; then
+  missing_debug_packages="$missing_debug_packages jq"
+fi
+if ! command -v sqlite3 >/dev/null 2>&1; then
+  missing_debug_packages="$missing_debug_packages sqlite3"
+fi
+if [ -n "$missing_debug_packages" ]; then
+  apt-get update
+  # shellcheck disable=SC2086
+  apt-get install -y $missing_debug_packages
+fi
+
 if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1; then
   apt-get update
   apt-get install -y ca-certificates curl gnupg

@@ -18,7 +18,7 @@ usage() {
 Usage: $(basename "$0") <command>
 
 Commands:
-  logs amber [--tail N] [--follow] [--all] [--env FILE] [--host IP]
+  logs amber [--tail N] [--follow] [--all] [--no-summary] [--env FILE] [--host IP]
 
 Collect manager-related logs:
   logs amber
@@ -27,6 +27,7 @@ Collect manager-related logs:
     --tail N     Number of lines per container (default: 200)
     --follow     Follow logs (similar to docker logs -f)
     --all        Include non-running containers
+    --no-summary Skip amber-manager API summaries before container logs
     --env FILE   Load matrix environment overrides for host/key discovery
     --host IP    Skip Hetzner lookup and connect directly to IP
 EOF
@@ -159,10 +160,98 @@ rm -f "$container_ids"
 EOF
 }
 
+print_amber_manager_summary() {
+  host_ip=$1
+
+  if ! command -v jq >/dev/null 2>&1; then
+    return 0
+  fi
+
+  summary_tmpdir=$(mktemp -d)
+  readyz_path=$summary_tmpdir/readyz.json
+  scenarios_path=$summary_tmpdir/scenarios.json
+  services_path=$summary_tmpdir/bindable-services.json
+
+  if ssh_exec "$host_ip" "curl -fsS http://127.0.0.1:4100/readyz" >"$readyz_path" 2>/dev/null; then
+    log_line "amber-manager readyz"
+    if ! jq -r '
+      if type == "object" then
+        to_entries | sort_by(.key) | map("\(.key)=\(.value | tostring)") | join(" ")
+      else
+        "Unexpected readyz payload"
+      end
+    ' "$readyz_path"; then
+      cat "$readyz_path"
+    fi
+  fi
+
+  if ssh_exec "$host_ip" "curl -fsS http://127.0.0.1:4100/v1/scenarios" >"$scenarios_path" 2>/dev/null; then
+    log_line "amber-manager scenarios"
+    if ! jq -r '
+      if type != "array" then
+        "Unexpected scenarios payload"
+      elif length == 0 then
+        "No scenarios."
+      else
+        sort_by([(.observed_state != "failed"), (.metadata.kind // ""), (.scenario_id // "")])
+        | .[]
+        | [
+            (.scenario_id // ""),
+            ("state=" + (.observed_state // "")),
+            ("kind=" + (.metadata.kind // "-")),
+            if (.metadata.provisioning_source // "") != "" then
+              "provisioning_source=" + .metadata.provisioning_source
+            else
+              empty
+            end,
+            if (.last_error // "") != "" then
+              "last_error=" + .last_error
+            else
+              empty
+            end
+          ]
+        | join(" ")
+      end
+    ' "$scenarios_path"; then
+      cat "$scenarios_path"
+    fi
+  fi
+
+  if ssh_exec "$host_ip" "curl -fsS http://127.0.0.1:4100/v1/bindable-services" >"$services_path" 2>/dev/null; then
+    log_line "amber-manager bindable-services"
+    if ! jq -r '
+      if type != "array" then
+        "Unexpected bindable-services payload"
+      elif length == 0 then
+        "No bindable services."
+      else
+        sort_by([(.available == true), (.display_name // ""), (.bindable_service_id // "")])
+        | .[]
+        | [
+            (.bindable_service_id // ""),
+            ("name=" + (.display_name // "-")),
+            ("available=" + ((.available // false) | tostring)),
+            if (.scenario_id // "") != "" then
+              "scenario_id=" + .scenario_id
+            else
+              empty
+            end
+          ]
+        | join(" ")
+      end
+    ' "$services_path"; then
+      cat "$services_path"
+    fi
+  fi
+
+  rm -rf "$summary_tmpdir"
+}
+
 run_logs_amber() {
   tail_count=200
   follow=0
   include_all=0
+  show_summary=1
 
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -189,6 +278,10 @@ run_logs_amber() {
         include_all=1
         shift
         ;;
+      --no-summary)
+        show_summary=0
+        shift
+        ;;
       --help|-h)
         usage
         exit 0
@@ -205,6 +298,9 @@ run_logs_amber() {
   ssh_require_cli
 
   ssh_wait_for_ready "$host_ip"
+  if [ "$show_summary" = "1" ]; then
+    print_amber_manager_summary "$host_ip"
+  fi
   collect_amber_manager_container_logs "$host_ip" "$tail_count" "$follow" "$include_all"
 }
 
